@@ -106,7 +106,8 @@ unless proxy_list_path.nil?
     # read proxy file and load the proxy list
     f = File.open(proxy_list_path)
     f.each do |line|
-        next if line.strip == ''
+        line.strip!
+        next if line == ''
         line = "http://#{line}" unless line =~ /^http:\/\/.+/
         proxy_list << URI.parse(line)
     end
@@ -243,8 +244,9 @@ total.to_a.sort{|a,b|a[0] <=> b[0]}.each do |key_pair|
     puts "Status code #{key}"
     puts "=========================="
     puts "Total requests: #{status_data[:count]}"
-    puts "Total time:   #{status_data[:time]}"
     puts "--------------------------"
+    puts "              #{Benchmark::Tms::CAPTION}"
+    puts "Total time:   #{status_data[:time]}"
     puts "Max time:     #{status_data[:max]}"
     puts "Average time: #{average}"
     puts "Min time:     #{status_data[:min]}"
