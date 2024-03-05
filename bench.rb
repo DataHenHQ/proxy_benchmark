@@ -17,7 +17,16 @@ def show_help
 
     Usage:
 
-      ruby #{__FILE__} URL QUANTITY CONCURRENCY [TIMEOUT=2000] [PROXY_LIST_FILE]
+      bundle exec ruby #{__FILE__} URL QUANTITY CONCURRENCY [TIMEOUT=2000] [PROXY_LIST_FILE]
+
+    Arguments
+    =========
+    URL               Target URL to use for the benchmark.
+    QUANTITY          How many requests to execute for the test.
+    CONCURRENCY       How many parallel requests should be used to benchamrk the proxy.
+                    The concurrency value cannot be higher than the quantity.
+    TIMEOUT           Optional. Request timeout before failure. Default: 2000.
+    PROXY_LIST_FILE   Optional. Proxy list file containing one proxy address per line.
     """
 end
 
