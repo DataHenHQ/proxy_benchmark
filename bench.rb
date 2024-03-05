@@ -160,7 +160,7 @@ Parallel.each(0..(concurrency-1), in_threads: concurrency) do |thread_index|
         key = nil
         time = Benchmark.measure do
             begin
-                Net::HTTP.start(target_uri.host, target_uri.port, proxy.host, proxy.port, proxy.user, proxy.password, use_ssl: use_ssl, verify_mode: OpenSSL::SSL::VERIFY_NONE, read_timeout: request_timeout) do |http|
+                Net::HTTP.start(target_uri.host, target_uri.port, proxy.host, proxy.port, proxy.user, proxy.password, use_ssl: use_ssl, verify_mode: OpenSSL::SSL::VERIFY_NONE, read_timeout: request_timeout, open_timeout: request_timeout, ssl_timeout: request_timeout, keep_alive_timeout: 0) do |http|
                     http.request request do |response|
                         #puts response.inspect if debug
                         response.read_body do |chunk|
