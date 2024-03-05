@@ -2,9 +2,14 @@ require 'net/http'
 require 'uri'
 require 'parallel'
 require 'concurrent'
-require "benchmark"
+require 'benchmark'
+require 'ruby-progressbar'
+require 'time'
 
-debug = true
+DEFAULT_TIMEOUT = 2000
+
+debug = false
+debug_content = false
 
 def show_help
     puts """
@@ -12,7 +17,7 @@ def show_help
 
     Usage:
 
-      ruby #{__FILE__} URL QUANTITY CONCURRENCY [PROXY_LIST_FILE]
+      ruby #{__FILE__} URL QUANTITY CONCURRENCY [TIMEOUT=2000] [PROXY_LIST_FILE]
     """
 end
 
@@ -34,7 +39,6 @@ end
 raw_quantity = ARGV.shift
 puts "raw quantity: #{raw_quantity.inspect}" if debug
 quantity = Integer(raw_quantity)
-puts quantity.inspect if debug
 if quantity.nil?
     STDERR.puts "Invalid quantity value \"#{raw_quantity}\""
     exit 1
@@ -54,6 +58,24 @@ if concurrency.nil?
 end
 if concurrency < 1
     STDERR.puts "Invalid concurrency value #{concurrency}, it must be greater or equal 1"
+    exit 1
+end
+
+# validate quantity vs concurrency
+if quantity < concurrency
+    STDERR.puts "Can't set a higher concurrency than the quantity"
+    exit 1
+end
+
+# parse and validate timeout param
+raw_timeout = ARGV.shift
+puts "raw timeout: #{raw_timeout.inspect}" if debug
+timeout = Integer(raw_timeout)
+if timeout.nil?
+    timeout = DEFAULT_TIMEOUT
+end
+if timeout < 1
+    STDERR.puts "Invalid timeout value #{timeout}, it must be greater or equal 1"
     exit 1
 end
 
@@ -92,13 +114,17 @@ end
 
 # run benchmark
 semaphore = Mutex.new
-sums = Concurrent::Array.new
+data = Concurrent::Array.new
+progressbar = ProgressBar.create(total: quantity, length: 80, format: 'Progress %c/%C |%B| %a %e')
+progressbar.total = quantity
 Parallel.each(0..(concurrency-1), in_threads: concurrency) do |thread_index|
     puts "[T#{thread_index}]: Thread Index = #{thread_index}" if debug
     # calc limit
     target_uri = nil
-    sums << {time: nil, count: 0}
+    sums = {}
     limit = 0
+    request_timeout = 0
+    report_threshold = 0
     semaphore.synchronize do
         target_uri = url.clone
         limit = (quantity.to_f / concurrency.to_f).floor
@@ -107,37 +133,110 @@ Parallel.each(0..(concurrency-1), in_threads: concurrency) do |thread_index|
         puts "[T#{thread_index}]: Adjustment = #{adjustment}" if debug
         limit += 1 if adjustment > 0 && thread_index < adjustment
         puts "[T#{thread_index}]: Limit after = #{limit}" if debug
+        report_threshold = quantity / (concurrency * 20)
+        report_threshold = 10 if report_threshold > 10
+        request_timeout = timeout + 0
     end
 
     # perform test
+    report_count = thread_index
+    report_count_adjustment = thread_index
+    report_time = Time.now.to_i
     proxy_count = proxy_list.length
     limit.times do |index|
         proxy = proxy_list[rand(proxy_count)].clone
-        proxy_address = proxy.host.nil? ? nil : "#{proxy.scheme}://#{proxy.host}"
         use_ssl = (target_uri.scheme =~ /https/)
         request = Net::HTTP::Get.new(target_uri)
+        key = nil
         time = Benchmark.measure do
-            Net::HTTP.start(target_uri.host, target_uri.port, proxy_address, proxy.port, proxy.user, proxy.password, use_ssl: use_ssl) do |http|
-                http.request request do |response|
-                    response.read_body do |chunk|
-                        #puts chunk
-                        # do nothing
+            begin
+                Net::HTTP.start(target_uri.host, target_uri.port, proxy.host, proxy.port, proxy.user, proxy.password, use_ssl: use_ssl, verify_mode: OpenSSL::SSL::VERIFY_NONE, read_timeout: request_timeout) do |http|
+                    http.request request do |response|
+                        #puts response.inspect if debug
+                        response.read_body do |chunk|
+                            # show content only on debug
+                            puts chunk if debug_content && debug
+                        end
+                        key = "#{response.code}"
                     end
-                    puts "[T#{thread_index}]: Response status code = #{response.code}" if debug
                 end
+            rescue => ex
+                STDERR.puts ex.inspect if debug
+                key = "Failed"
             end
         end
-        puts "[T#{thread_index}]: Time: #{time}" if debug
-        sums[thread_index][:time] = sums[thread_index][:time].nil? ? time : sums[thread_index][:time] + time
-        sums[thread_index][:count] += 1
+        puts "[T#{thread_index}]: Response status code = #{key} | Time: #{time}" if debug
+
+        # sum times depending on response code
+        sums[key] = {time: Benchmark::Tms::new, count: 0, max: Benchmark::Tms::new, min: Benchmark::Tms::new} unless sums.has_key?(key)
+        time_data = sums[key]
+        time_data[:time] += time
+        time_data[:count] += 1
+        time_data[:max] = time if time_data[:max].total < time.total
+        time_data[:min] = time if time_data[:min].total > time.total || time_data[:min].total <= 0
+
+        # show progress as long as it's not on debug mode
+        unless debug
+            report_count += 1
+            if report_count > report_threshold
+                semaphore.synchronize do
+                    progressbar.progress += report_count - report_count_adjustment
+                end
+                report_count = 0
+                report_count_adjustment = 0
+            end
+        end
+    end
+
+    # show progress
+    unless debug
+        semaphore.synchronize do
+            progressbar.progress += report_count
+        end
+    end
+    data << sums
+end
+
+# join data
+count = 0
+total_time = Benchmark::Tms::new
+total = {}
+data.each do |sums|
+    sums.each do |key, time_data|
+        total[key] = {time: Benchmark::Tms::new, count: 0, max: Benchmark::Tms::new, min: Benchmark::Tms::new} unless total.has_key?(key)
+        total_data = total[key]
+        time = time_data[:time]
+        total_data[:time] += time.clone
+        total_data[:count] += time_data[:count]
+
+        # calc min/max
+        total_time += time
+        max_time = time_data[:max]
+        min_time = time_data[:min]
+        total_data[:max] = max_time if total_data[:max].total < max_time.total
+        total_data[:min] = min_time if total_data[:min].total > min_time.total || total_data[:min].total <= 0
+        count += time_data[:count]
     end
 end
 
+puts ""
 puts "===============" if debug
 puts "Expected quantity: #{quantity}" if debug
-puts "Real quantity: #{sums.inject(0){|t, v|t += v[:count]}}" if debug
+puts "Real quantity: #{count}" if debug
+puts "Total request time: #{total_time}"
 
-total = sums.inject(nil){|t, v|t = t.nil? ? v[:time] : t+v[:time]}
-puts "Total time:   #{total}"
-average = total / quantity
-puts "Average time: #{average}"
+# display time data per status code
+total.to_a.sort{|a,b|a[0] <=> b[0]}.each do |key_pair|
+    key, status_data = key_pair
+    average = status_data[:time] / status_data[:count]
+    puts ""
+    puts "=========================="
+    puts "Status code #{key}"
+    puts "=========================="
+    puts "Total requests: #{status_data[:count]}"
+    puts "Total time:   #{status_data[:time]}"
+    puts "--------------------------"
+    puts "Max time:     #{status_data[:max]}"
+    puts "Average time: #{average}"
+    puts "Min time:     #{status_data[:min]}"
+end
